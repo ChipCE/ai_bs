@@ -1,4 +1,30 @@
 from flask import Flask, request, jsonify, render_template
+import os
+from datetime import datetime, date
+
+# excel_ops resides in the same src package
+import excel_ops
+
+# --------------------------------------------------------------------------- #
+# Helpers                                                                    #
+# --------------------------------------------------------------------------- #
+
+# Excel ファイルの絶対パスを取得
+excel_path = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "data", "デモ機予約表.xlsx")
+)
+
+
+def _parse_date_any(s: str) -> date:
+    """
+    Accept `YYYY-MM-DD` or `YYYY/MM/DD` and return datetime.date.
+    """
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(s.strip(), fmt).date()
+        except ValueError:
+            continue
+    raise ValueError("日付形式が正しくありません (YYYY-MM-DD または YYYY/MM/DD)")
 
 def create_app():
     app = Flask(__name__)
@@ -14,7 +40,7 @@ def create_app():
         text = data.get('text')
         state = data.get('state')
         user_info = data.get('user_info', {})
-        context = data.get('context', {})
+        context = data.get('context') or {}
         
         if not state:
             reply_text = "こんにちは！デモ機予約Botです。お名前を教えてください。"
@@ -44,6 +70,86 @@ def create_app():
             else:
                 reply_text = "社員番号（職番）を入力してください。"
                 next_state = "AWAITING_USER_INFO_EMPLOYEE_ID"
+        # ------------------------------------------------------------------ #
+        # 予約フロー                                                       #
+        # ------------------------------------------------------------------ #
+        elif state == "AWAITING_COMMAND" and text == "予約":
+            # initiate reservation intent
+            context["intent"] = "reserve"
+            reply_text = "ご希望のデモ機の種類を入力してください。（例: FE / RT / PC）"
+            next_state = "AWAITING_DEVICE_TYPE"
+        elif state == "AWAITING_DEVICE_TYPE" and context.get("intent") == "reserve":
+            device_type = (text or "").strip()
+            if not device_type:
+                reply_text = "デモ機の種類を入力してください。"
+                next_state = "AWAITING_DEVICE_TYPE"
+            else:
+                context["device_type"] = device_type
+                reply_text = (
+                    "予約期間を入力してください（開始日,終了日）。"
+                    "例: 2025-09-10,2025/09/12"
+                )
+                next_state = "AWAITING_DATES"
+        elif state == "AWAITING_DATES" and context.get("intent") == "reserve":
+            try:
+                start_str, end_str = [p.strip() for p in (text or "").split(",")]
+                start_date = _parse_date_any(start_str)
+                end_date = _parse_date_any(end_str)
+            except Exception:
+                reply_text = (
+                    "日付形式が正しくありません。再度 'YYYY-MM-DD,YYYY/MM/DD' 形式で入力してください。"
+                )
+                next_state = "AWAITING_DATES"
+            else:
+                # 検索
+                dev_type = context.get("device_type")
+                candidate = excel_ops.find_available_device(
+                    excel_path, dev_type, start_date, end_date
+                )
+                if candidate:
+                    context.update(
+                        {
+                            "start_date": start_date.isoformat(),
+                            "end_date": end_date.isoformat(),
+                            "candidate_device": candidate,
+                        }
+                    )
+                    reply_text = (
+                        f"{candidate} を {start_date:%Y-%m-%d} から "
+                        f"{end_date:%Y-%m-%d} で予約します。よろしいですか？（はい / いいえ）"
+                    )
+                    next_state = "CONFIRM_RESERVATION"
+                else:
+                    reply_text = (
+                        "指定期間で空いているデモ機が見つかりません。"
+                        "別の日付を入力してください。"
+                    )
+                    next_state = "AWAITING_DATES"
+        elif state == "CONFIRM_RESERVATION" and context.get("intent") == "reserve":
+            if text == "はい":
+                try:
+                    start_d = _parse_date_any(context["start_date"])
+                    end_d = _parse_date_any(context["end_date"])
+                    booking_id = excel_ops.book(
+                        excel_path,
+                        context["candidate_device"],
+                        start_d,
+                        end_d,
+                        user_info,
+                    )
+                    reply_text = f"予約完了しました！ 予約ID: {booking_id}"
+                except Exception as e:
+                    reply_text = f"予約処理でエラーが発生しました: {e}"
+                next_state = "AWAITING_COMMAND"
+                # clear intent/context
+                context = {}
+            elif text == "いいえ":
+                reply_text = "予約を中止しました。ご用件をどうぞ。"
+                next_state = "AWAITING_COMMAND"
+                context = {}
+            else:
+                reply_text = "『はい』または『いいえ』で回答してください。"
+                next_state = "CONFIRM_RESERVATION"
         else:
             reply_text = f"入力を受け付けました: {text}"
             next_state = "AWAITING_COMMAND"
