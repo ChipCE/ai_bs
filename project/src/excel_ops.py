@@ -1,7 +1,46 @@
 import openpyxl
 from datetime import datetime, date
+from calendar import monthrange
 import uuid
 import os
+import time  # for filesystem flush on some platforms
+
+# --------------------------------------------------------------------------- #
+# Date helpers for multi-month support                                       #
+# --------------------------------------------------------------------------- #
+
+def _iter_month_ranges(start_date: date, end_date: date):
+    """
+    Yield (m_start, m_end) pairs where each pair covers the portion of the
+    original [start_date, end_date] that falls inside a single month.
+
+    The first span starts at `start_date`, the last span ends at `end_date`.
+    """
+    cur_year, cur_month = start_date.year, start_date.month
+
+    while True:
+        last_day = monthrange(cur_year, cur_month)[1]
+        span_start = start_date if (cur_year == start_date.year and cur_month == start_date.month) \
+            else date(cur_year, cur_month, 1)
+
+        # decide span_end
+        if cur_year == end_date.year and cur_month == end_date.month:
+            span_end = end_date
+        else:
+            span_end = date(cur_year, cur_month, last_day)
+
+        yield span_start, span_end
+
+        # break if we just yielded the final month
+        if cur_year == end_date.year and cur_month == end_date.month:
+            break
+
+        # advance month
+        if cur_month == 12:
+            cur_year += 1
+            cur_month = 1
+        else:
+            cur_month += 1
 
 
 def _get_month_sheet_name(target_date):
@@ -72,34 +111,25 @@ def check_availability(excel_path, device_name, start_date, end_date):
     Returns:
         bool: True if available, False if already booked
     """
-    if start_date.month != end_date.month or start_date.year != end_date.year:
-        raise ValueError("予約期間は同じ月内である必要があります")
-    
     wb = openpyxl.load_workbook(excel_path)
-    
-    # Get the correct sheet for the month
-    sheet_name = _get_month_sheet_name(start_date)
-    if sheet_name not in wb.sheetnames:
-        raise ValueError(f"シートが見つかりません: {sheet_name}")
-    
-    sheet = wb[sheet_name]
-    
-    # Find the device row
-    device_row = _find_device_row(sheet, device_name)
-    if device_row is None:
-        raise ValueError(f"デモ機が見つかりません: {device_name}")
-    
-    # Get columns for the date range
-    date_columns = _get_date_columns(sheet, start_date, end_date)
-    
-    # Check if any cell in the range is already booked
-    for col in date_columns:
-        cell_value = sheet.cell(row=device_row, column=col).value
-        if cell_value is not None:
-            return False
-    
-    wb.close()
-    return True
+    try:
+        for m_start, m_end in _iter_month_ranges(start_date, end_date):
+            sheet_name = _get_month_sheet_name(m_start)
+            if sheet_name not in wb.sheetnames:
+                raise ValueError(f"シートが見つかりません: {sheet_name}")
+
+            sheet = wb[sheet_name]
+            device_row = _find_device_row(sheet, device_name)
+            if device_row is None:
+                raise ValueError(f"デモ機が見つかりません: {device_name}")
+
+            cols = _get_date_columns(sheet, m_start, m_end)
+            for col in cols:
+                if sheet.cell(row=device_row, column=col).value is not None:
+                    return False
+        return True
+    finally:
+        wb.close()
 
 
 def find_available_device(excel_path, device_type, start_date, end_date):
@@ -115,31 +145,38 @@ def find_available_device(excel_path, device_type, start_date, end_date):
     Returns:
         str | None: The first available device name or None if none found.
     """
-    if start_date.month != end_date.month or start_date.year != end_date.year:
-        raise ValueError("予約期間は同じ月内である必要があります")
-
     wb = openpyxl.load_workbook(excel_path)
-    sheet_name = _get_month_sheet_name(start_date)
-    if sheet_name not in wb.sheetnames:
+    try:
+        # collect candidate names from the start-month sheet
+        start_sheet_name = _get_month_sheet_name(start_date)
+        if start_sheet_name not in wb.sheetnames:
+            raise ValueError(f"シートが見つかりません: {start_sheet_name}")
+
+        start_sheet = wb[start_sheet_name]
+        candidates = [
+            name for _row, name in _iter_device_rows(start_sheet)
+            if str(name).startswith(device_type)
+        ]
+
+        for dev_name in candidates:
+            ok = True
+            for m_start, m_end in _iter_month_ranges(start_date, end_date):
+                sheet_name = _get_month_sheet_name(m_start)
+                if sheet_name not in wb.sheetnames:
+                    raise ValueError(f"シートが見つかりません: {sheet_name}")
+                sheet = wb[sheet_name]
+                row = _find_device_row(sheet, dev_name)
+                if row is None:
+                    raise ValueError(f"デモ機が見つかりません: {dev_name}")
+                cols = _get_date_columns(sheet, m_start, m_end)
+                if any(sheet.cell(row=row, column=c).value is not None for c in cols):
+                    ok = False
+                    break
+            if ok:
+                return dev_name
+        return None
+    finally:
         wb.close()
-        raise ValueError(f"シートが見つかりません: {sheet_name}")
-
-    sheet = wb[sheet_name]
-
-    # Pre-compute date columns for efficiency
-    date_columns = _get_date_columns(sheet, start_date, end_date)
-
-    for row_idx, dev_name in _iter_device_rows(sheet):
-        if not dev_name.startswith(device_type):
-            continue
-
-        # Check availability for this specific device
-        if all(sheet.cell(row=row_idx, column=col).value is None for col in date_columns):
-            wb.close()
-            return dev_name
-
-    wb.close()
-    return None
 
 
 def book(excel_path, device_name, start_date, end_date, user_info):
@@ -178,10 +215,20 @@ def book(excel_path, device_name, start_date, end_date, user_info):
     # Generate booking ID
     booking_id = _generate_booking_id()
 
-    # Mark cells as booked with unique marker "C:<booking_id>"
+    # Mark cells across all months
     booking_marker = f"C:{booking_id}"
-    for col in date_columns:
-        sheet.cell(row=device_row, column=col, value=booking_marker)
+    for m_start, m_end in _iter_month_ranges(start_date, end_date):
+        sheet_name = _get_month_sheet_name(m_start)
+        if sheet_name not in wb.sheetnames:
+            wb.close()
+            raise ValueError(f"シートが見つかりません: {sheet_name}")
+        sheet_m = wb[sheet_name]
+        device_row_m = _find_device_row(sheet_m, device_name)
+        if device_row_m is None:
+            wb.close()
+            raise ValueError(f"デモ機が見つかりません: {device_name}")
+        for col in _get_date_columns(sheet_m, m_start, m_end):
+            sheet_m.cell(row=device_row_m, column=col, value=booking_marker)
     
     # Add entry to booking log
     log_sheet = wb['予約ログ']
@@ -224,66 +271,90 @@ def cancel(excel_path, booking_id):
         ValueError: If the booking ID is not found
     """
     wb = openpyxl.load_workbook(excel_path)
-    
-    # Find booking in log
-    log_sheet = wb['予約ログ']
-    booking_row = None
-    
-    for row in range(2, log_sheet.max_row + 1):
-        if log_sheet.cell(row=row, column=1).value == booking_id:
-            booking_row = row
-            break
-    
-    if booking_row is None:
-        wb.close()
-        raise ValueError(f"予約IDが見つかりません: {booking_id}")
-    
-    # Get booking details
-    device_name = log_sheet.cell(row=booking_row, column=6).value
-    start_date_str = log_sheet.cell(row=booking_row, column=7).value
-    end_date_str = log_sheet.cell(row=booking_row, column=8).value
-    
-    # Parse dates
-    start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
-    end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
-    
-    # Get the correct sheet for the month
-    sheet_name = _get_month_sheet_name(start_date)
-    if sheet_name not in wb.sheetnames:
-        wb.close()
-        raise ValueError(f"シートが見つかりません: {sheet_name}")
-    
-    sheet = wb[sheet_name]
-    
-    # Find the device row
-    device_row = _find_device_row(sheet, device_name)
-    if device_row is None:
-        wb.close()
-        raise ValueError(f"デモ機が見つかりません: {device_name}")
-    
-    # Get columns for the date range
-    # 指示に従い _get_date_columns を使わず直接計算
-    date_columns = [day + 2 for day in range(start_date.day, end_date.day + 1)]
-    
-    # Clear cells
-    for col in date_columns:
-        # 無条件でセルをクリア
-        sheet.cell(row=device_row, column=col, value=None)
-    
-    # Update status in log (optional, could also add a new "キャンセル" entry)
-    # log_sheet.cell(row=booking_row, column=9, value='キャンセル')
-    
-    # Save once and close
-    wb.save(excel_path)
-    wb.close()
+    try:
+        # --- locate booking log row ---
+        log_sheet = wb['予約ログ']
+        booking_row = None
+        for row in range(2, log_sheet.max_row + 1):
+            if log_sheet.cell(row=row, column=1).value == booking_id:
+                booking_row = row
+                break
+        if booking_row is None:
+            raise ValueError(f"予約IDが見つかりません: {booking_id}")
 
-    # --- double-check persistence: reopen, verify & clear again ---
-    wb_verify = openpyxl.load_workbook(excel_path)
-    if sheet_name in wb_verify.sheetnames:
-        sheet_v = wb_verify[sheet_name]
-        # Re-run clear just in case previous save was interrupted
-        for col in date_columns:
-            # 検証用ワークブックでも無条件でセルをクリア
-            sheet_v.cell(row=device_row, column=col, value=None)
-        wb_verify.save(excel_path)
-    wb_verify.close()
+        device_name = log_sheet.cell(row=booking_row, column=6).value
+        start_date = datetime.strptime(
+            log_sheet.cell(row=booking_row, column=7).value, "%Y-%m-%d"
+        ).date()
+        end_date = datetime.strptime(
+            log_sheet.cell(row=booking_row, column=8).value, "%Y-%m-%d"
+        ).date()
+
+        # --- clear booking marks across all months ---
+        for m_start, m_end in _iter_month_ranges(start_date, end_date):
+            sheet_name = _get_month_sheet_name(m_start)
+            if sheet_name not in wb.sheetnames:
+                raise ValueError(f"シートが見つかりません: {sheet_name}")
+            sheet = wb[sheet_name]
+            device_row = _find_device_row(sheet, device_name)
+            if device_row is None:
+                raise ValueError(f"デモ機が見つかりません: {device_name}")
+            # ハード化: 見出し行(8行目)を走査し、対象日のセルでかつ
+            # この予約IDでマークされたセルのみをクリア
+            marker_prefix = f"C:{booking_id}"
+            for col in range(3, sheet.max_column + 1):
+                header_val = sheet.cell(row=8, column=col).value
+                if (
+                    isinstance(header_val, int)
+                    and m_start.day <= header_val <= m_end.day
+                ):
+                    cell_val = sheet.cell(row=device_row, column=col).value
+                    if isinstance(cell_val, str) and cell_val.startswith(marker_prefix):
+                        sheet.cell(row=device_row, column=col, value=None)
+
+        wb.save(excel_path)
+    finally:
+        wb.close()
+
+    # --- verification reopen pass (safety) ---
+    wb_v = openpyxl.load_workbook(excel_path)
+    try:
+        for m_start, m_end in _iter_month_ranges(start_date, end_date):
+            sheet_name = _get_month_sheet_name(m_start)
+            if sheet_name in wb_v.sheetnames:
+                sheet_v = wb_v[sheet_name]
+                row_v = _find_device_row(sheet_v, device_name)
+                if row_v is not None:
+                    marker_prefix = f"C:{booking_id}"
+                    for col in range(3, sheet_v.max_column + 1):
+                        header_val = sheet_v.cell(row=8, column=col).value
+                        if (
+                            isinstance(header_val, int)
+                            and m_start.day <= header_val <= m_end.day
+                        ):
+                            cell_val = sheet_v.cell(row=row_v, column=col).value
+                            if (
+                                isinstance(cell_val, str)
+                                and cell_val.startswith(marker_prefix)
+                            ):
+                                sheet_v.cell(row=row_v, column=col, value=None)
+
+        # ------------------------------------------------------------------ #
+        # Fallback sweep: row-wide purge of any residual cells with this ID   #
+        # ------------------------------------------------------------------ #
+        for m_start, m_end in _iter_month_ranges(start_date, end_date):
+            sheet_name = _get_month_sheet_name(m_start)
+            if sheet_name in wb_v.sheetnames:
+                sheet_v = wb_v[sheet_name]
+                row_v = _find_device_row(sheet_v, device_name)
+                if row_v is not None:
+                    marker_prefix = f"C:{booking_id}"
+                    for col in range(3, sheet_v.max_column + 1):
+                        cell_val = sheet_v.cell(row=row_v, column=col).value
+                        if isinstance(cell_val, str) and cell_val.startswith(marker_prefix):
+                            sheet_v.cell(row=row_v, column=col, value=None)
+        wb_v.save(excel_path)
+        # give filesystem a moment to flush on Windows environments
+        time.sleep(0.05)
+    finally:
+        wb_v.close()
