@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template
 
 def create_app():
     app = Flask(__name__)
@@ -27,6 +27,10 @@ def create_app():
         }
         
         return jsonify(response)
+    
+    @app.route('/', methods=['GET'])
+    def index():
+        return render_template('index.html')
     
     return app
 
