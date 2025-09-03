@@ -150,6 +150,41 @@ def create_app():
             else:
                 reply_text = "『はい』または『いいえ』で回答してください。"
                 next_state = "CONFIRM_RESERVATION"
+
+        # ------------------------------------------------------------------ #
+        # キャンセルフロー                                                 #
+        # ------------------------------------------------------------------ #
+        elif state == "AWAITING_COMMAND" and text == "キャンセル":
+            context["intent"] = "cancel"
+            reply_text = "予約IDを入力してください。"
+            next_state = "AWAITING_CANCEL_BOOKING_ID"
+        elif state == "AWAITING_CANCEL_BOOKING_ID" and context.get("intent") == "cancel":
+            booking_id = (text or "").strip()
+            if booking_id:
+                context["booking_id"] = booking_id
+                reply_text = "この予約をキャンセルしますか？（はい / いいえ）"
+                next_state = "CANCEL_CONFIRM"
+            else:
+                reply_text = "予約IDを入力してください。"
+                next_state = "AWAITING_CANCEL_BOOKING_ID"
+        elif state == "CANCEL_CONFIRM" and context.get("intent") == "cancel":
+            if text == "はい":
+                try:
+                    b_id = context.get("booking_id")
+                    excel_ops.cancel(excel_path, b_id)
+                    reply_text = "キャンセル完了しました。ご用件をどうぞ。"
+                except Exception as e:
+                    reply_text = f"キャンセル処理でエラーが発生しました: {e}"
+                next_state = "AWAITING_COMMAND"
+                context = {}
+            elif text == "いいえ":
+                reply_text = "キャンセルを中止しました。ご用件をどうぞ。"
+                next_state = "AWAITING_COMMAND"
+                context = {}
+            else:
+                reply_text = "『はい』または『いいえ』で回答してください。"
+                next_state = "CANCEL_CONFIRM"
+
         else:
             reply_text = f"入力を受け付けました: {text}"
             next_state = "AWAITING_COMMAND"
