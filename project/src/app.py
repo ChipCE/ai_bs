@@ -5,7 +5,11 @@ def create_app():
     
     @app.route('/api/chat', methods=['POST'])
     def chat():
-        data = request.get_json()
+        data = request.get_json(silent=True)
+        # Treat `None` (no body / invalid JSON) or non-dict as bad request.
+        # An empty dict `{}` is allowed and will fall through to defaults.
+        if data is None or not isinstance(data, dict):
+            return jsonify({"error": "invalid JSON body"}), 400
         
         text = data.get('text')
         state = data.get('state')
