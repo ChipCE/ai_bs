@@ -43,6 +43,22 @@ def _generate_booking_id():
     return str(uuid.uuid4())[:8]
 
 
+# --------------------------------------------------------------------------- #
+# Utility iterator to enumerate device rows                                  #
+# --------------------------------------------------------------------------- #
+
+def _iter_device_rows(sheet):
+    """
+    Yield (row_index, device_name) tuples for each device registered
+    in column B starting from row 9.
+    """
+    for row in range(9, sheet.max_row + 1):
+        name = sheet.cell(row=row, column=2).value
+        if name:
+            yield row, str(name)
+
+
+
 def check_availability(excel_path, device_name, start_date, end_date):
     """
     Check if a device is available for the specified date range.
@@ -84,6 +100,46 @@ def check_availability(excel_path, device_name, start_date, end_date):
     
     wb.close()
     return True
+
+
+def find_available_device(excel_path, device_type, start_date, end_date):
+    """
+    Find the first available device of a given *type* for the specified period.
+
+    Args:
+        excel_path (str): Path to workbook
+        device_type (str): Prefix of the device name, e.g., \"FE\" or \"PC\"
+        start_date (date): Start date (inclusive)
+        end_date (date): End date (inclusive)
+
+    Returns:
+        str | None: The first available device name or None if none found.
+    """
+    if start_date.month != end_date.month or start_date.year != end_date.year:
+        raise ValueError("予約期間は同じ月内である必要があります")
+
+    wb = openpyxl.load_workbook(excel_path)
+    sheet_name = _get_month_sheet_name(start_date)
+    if sheet_name not in wb.sheetnames:
+        wb.close()
+        raise ValueError(f"シートが見つかりません: {sheet_name}")
+
+    sheet = wb[sheet_name]
+
+    # Pre-compute date columns for efficiency
+    date_columns = _get_date_columns(sheet, start_date, end_date)
+
+    for row_idx, dev_name in _iter_device_rows(sheet):
+        if not dev_name.startswith(device_type):
+            continue
+
+        # Check availability for this specific device
+        if all(sheet.cell(row=row_idx, column=col).value is None for col in date_columns):
+            wb.close()
+            return dev_name
+
+    wb.close()
+    return None
 
 
 def book(excel_path, device_name, start_date, end_date, user_info):
