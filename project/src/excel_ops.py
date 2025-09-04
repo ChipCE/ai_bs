@@ -6,6 +6,7 @@ import os
 import time  # for filesystem flush on some platforms
 import re
 import unicodedata
+import shutil  # for backup copy
 
 # --------------------------------------------------------------------------- #
 # Date helpers for multi-month support                                       #
@@ -89,6 +90,57 @@ def _get_date_columns(sheet, start_date, end_date):
 def _generate_booking_id():
     """Generate a unique booking ID."""
     return str(uuid.uuid4())[:8]
+
+# --------------------------------------------------------------------------- #
+# Simple file-lock and safe save helper                                       #
+# --------------------------------------------------------------------------- #
+
+
+class _FileLock:
+    """Directory-based lock to guard workbook writes (best-effort, cross-platform)."""
+
+    def __init__(self, target_path, timeout: float = 10.0, interval: float = 0.1):
+        self.lock_dir = target_path + ".lock"
+        self.timeout = timeout
+        self.interval = interval
+
+    def __enter__(self):
+        start = time.time()
+        while True:
+            try:
+                os.mkdir(self.lock_dir)
+                break
+            except FileExistsError:
+                if time.time() - start > self.timeout:
+                    raise TimeoutError("ファイルが使用中です。しばらくしてから再度お試しください。")
+                time.sleep(self.interval)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            os.rmdir(self.lock_dir)
+        except Exception:
+            pass
+
+
+def _safe_save_workbook(wb, excel_path):
+    """
+    Save workbook atomically and keep a timestamped backup of the original file.
+    """
+    base_dir = os.path.dirname(excel_path)
+    tmp_path = os.path.join(base_dir, f"._tmp_{uuid.uuid4().hex}.xlsx")
+
+    # Backup (best-effort)
+    if os.path.exists(excel_path):
+        ts = datetime.now().strftime("%Y%m%d%H%M%S")
+        bak_path = os.path.join(base_dir, f"{os.path.basename(excel_path)}.{ts}.bak")
+        try:
+            shutil.copy2(excel_path, bak_path)
+        except Exception:
+            pass
+
+    wb.save(tmp_path)
+    os.replace(tmp_path, excel_path)
 
 
 # --------------------------------------------------------------------------- #
@@ -250,65 +302,45 @@ def book(excel_path, device_name, start_date, end_date, user_info):
     # First check if available
     if not check_availability(excel_path, device_name, start_date, end_date):
         raise ValueError(f"指定された期間にデモ機 '{device_name}' は既に予約されています")
-    
-    wb = openpyxl.load_workbook(excel_path)
-    
-    # Get the correct sheet for the month
-    sheet_name = _get_month_sheet_name(start_date)
-    sheet = wb[sheet_name]
-    
-    # Find the device row
-    device_row = _find_device_row(sheet, device_name)
-    
-    # Get columns for the date range
-    date_columns = _get_date_columns(sheet, start_date, end_date)
-    
-    # Generate booking ID
-    booking_id = _generate_booking_id()
 
-    # Mark cells across all months
-    booking_marker = f"C:{booking_id}"
-    for m_start, m_end in _iter_month_ranges(start_date, end_date):
-        sheet_name = _get_month_sheet_name(m_start)
-        if sheet_name not in wb.sheetnames:
+    with _FileLock(excel_path):
+        wb = openpyxl.load_workbook(excel_path)
+        try:
+            # Mark cells across all months
+            booking_id = _generate_booking_id()
+            booking_marker = f"C:{booking_id}"
+            for m_start, m_end in _iter_month_ranges(start_date, end_date):
+                sheet_name = _get_month_sheet_name(m_start)
+                if sheet_name not in wb.sheetnames:
+                    raise ValueError(f"シートが見つかりません: {sheet_name}")
+                sheet_m = wb[sheet_name]
+                device_row_m = _find_device_row(sheet_m, device_name)
+                if device_row_m is None:
+                    raise ValueError(f"デモ機が見つかりません: {device_name}")
+                for col in _get_date_columns(sheet_m, m_start, m_end):
+                    sheet_m.cell(row=device_row_m, column=col, value=booking_marker)
+
+            # Ensure booking log sheet exists, then add entry
+            _ensure_booking_log_sheet(wb)
+            log_sheet = wb['予約ログ']
+            next_row = log_sheet.max_row + 1
+            now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+            start_date_str = start_date.strftime("%Y-%m-%d")
+            end_date_str = end_date.strftime("%Y-%m-%d")
+            log_sheet.cell(row=next_row, column=1, value=booking_id)
+            log_sheet.cell(row=next_row, column=2, value=now)
+            log_sheet.cell(row=next_row, column=3, value=user_info.get('name', ''))
+            log_sheet.cell(row=next_row, column=4, value=user_info.get('extension', ''))
+            log_sheet.cell(row=next_row, column=5, value=user_info.get('employee_id', ''))
+            log_sheet.cell(row=next_row, column=6, value=device_name)
+            log_sheet.cell(row=next_row, column=7, value=start_date_str)
+            log_sheet.cell(row=next_row, column=8, value=end_date_str)
+            log_sheet.cell(row=next_row, column=9, value='予約中')
+
+            _safe_save_workbook(wb, excel_path)
+            return booking_id
+        finally:
             wb.close()
-            raise ValueError(f"シートが見つかりません: {sheet_name}")
-        sheet_m = wb[sheet_name]
-        device_row_m = _find_device_row(sheet_m, device_name)
-        if device_row_m is None:
-            wb.close()
-            raise ValueError(f"デモ機が見つかりません: {device_name}")
-        for col in _get_date_columns(sheet_m, m_start, m_end):
-            sheet_m.cell(row=device_row_m, column=col, value=booking_marker)
-    
-    # Ensure booking log sheet exists, then add entry
-    _ensure_booking_log_sheet(wb)
-    log_sheet = wb['予約ログ']
-    next_row = log_sheet.max_row + 1
-    
-    # Get current datetime as string
-    now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-    
-    # Format dates as strings
-    start_date_str = start_date.strftime("%Y-%m-%d")
-    end_date_str = end_date.strftime("%Y-%m-%d")
-    
-    # Add log entry
-    log_sheet.cell(row=next_row, column=1, value=booking_id)  # 予約ID
-    log_sheet.cell(row=next_row, column=2, value=now)  # 予約日時
-    log_sheet.cell(row=next_row, column=3, value=user_info.get('name', ''))  # 予約者名
-    log_sheet.cell(row=next_row, column=4, value=user_info.get('extension', ''))  # 内線番号
-    log_sheet.cell(row=next_row, column=5, value=user_info.get('employee_id', ''))  # 職番
-    log_sheet.cell(row=next_row, column=6, value=device_name)  # デモ機名
-    log_sheet.cell(row=next_row, column=7, value=start_date_str)  # 予約開始日
-    log_sheet.cell(row=next_row, column=8, value=end_date_str)  # 予約終了日
-    log_sheet.cell(row=next_row, column=9, value='予約中')  # ステータス
-    
-    # Save the workbook
-    wb.save(excel_path)
-    wb.close()
-    
-    return booking_id
 
 
 def cancel(excel_path, booking_id):
@@ -322,91 +354,39 @@ def cancel(excel_path, booking_id):
     Raises:
         ValueError: If the booking ID is not found
     """
-    wb = openpyxl.load_workbook(excel_path)
-    try:
-        # --- locate booking log row ---
-        log_sheet = wb['予約ログ']
-        booking_row = None
-        for row in range(2, log_sheet.max_row + 1):
-            if log_sheet.cell(row=row, column=1).value == booking_id:
-                booking_row = row
-                break
-        if booking_row is None:
-            raise ValueError(f"予約IDが見つかりません: {booking_id}")
+    with _FileLock(excel_path):
+        wb = openpyxl.load_workbook(excel_path)
+        try:
+            log_sheet = wb['予約ログ']
+            booking_row = None
+            for row in range(2, log_sheet.max_row + 1):
+                if log_sheet.cell(row=row, column=1).value == booking_id:
+                    booking_row = row
+                    break
+            if booking_row is None:
+                raise ValueError(f"予約IDが見つかりません: {booking_id}")
 
-        device_name = log_sheet.cell(row=booking_row, column=6).value
-        start_date = datetime.strptime(
-            log_sheet.cell(row=booking_row, column=7).value, "%Y-%m-%d"
-        ).date()
-        end_date = datetime.strptime(
-            log_sheet.cell(row=booking_row, column=8).value, "%Y-%m-%d"
-        ).date()
+            device_name = log_sheet.cell(row=booking_row, column=6).value
+            start_date = datetime.strptime(log_sheet.cell(row=booking_row, column=7).value, "%Y-%m-%d").date()
+            end_date = datetime.strptime(log_sheet.cell(row=booking_row, column=8).value, "%Y-%m-%d").date()
 
-        # --- clear booking marks across all months ---
-        for m_start, m_end in _iter_month_ranges(start_date, end_date):
-            sheet_name = _get_month_sheet_name(m_start)
-            if sheet_name not in wb.sheetnames:
-                raise ValueError(f"シートが見つかりません: {sheet_name}")
-            sheet = wb[sheet_name]
-            device_row = _find_device_row(sheet, device_name)
-            if device_row is None:
-                raise ValueError(f"デモ機が見つかりません: {device_name}")
-            # ハード化: 見出し行(8行目)を走査し、対象日のセルでかつ
-            # この予約IDでマークされたセルのみをクリア
-            marker_prefix = f"C:{booking_id}"
-            for col in range(3, sheet.max_column + 1):
-                header_val = sheet.cell(row=8, column=col).value
-                if (
-                    isinstance(header_val, int)
-                    and m_start.day <= header_val <= m_end.day
-                ):
-                    cell_val = sheet.cell(row=device_row, column=col).value
-                    if isinstance(cell_val, str) and cell_val.startswith(marker_prefix):
-                        sheet.cell(row=device_row, column=col, value=None)
-
-        wb.save(excel_path)
-    finally:
-        wb.close()
-
-    # --- verification reopen pass (safety) ---
-    wb_v = openpyxl.load_workbook(excel_path)
-    try:
-        for m_start, m_end in _iter_month_ranges(start_date, end_date):
-            sheet_name = _get_month_sheet_name(m_start)
-            if sheet_name in wb_v.sheetnames:
-                sheet_v = wb_v[sheet_name]
-                row_v = _find_device_row(sheet_v, device_name)
-                if row_v is not None:
-                    marker_prefix = f"C:{booking_id}"
-                    for col in range(3, sheet_v.max_column + 1):
-                        header_val = sheet_v.cell(row=8, column=col).value
-                        if (
-                            isinstance(header_val, int)
-                            and m_start.day <= header_val <= m_end.day
-                        ):
-                            cell_val = sheet_v.cell(row=row_v, column=col).value
-                            if (
-                                isinstance(cell_val, str)
-                                and cell_val.startswith(marker_prefix)
-                            ):
-                                sheet_v.cell(row=row_v, column=col, value=None)
-
-        # ------------------------------------------------------------------ #
-        # Fallback sweep: row-wide purge of any residual cells with this ID   #
-        # ------------------------------------------------------------------ #
-        for m_start, m_end in _iter_month_ranges(start_date, end_date):
-            sheet_name = _get_month_sheet_name(m_start)
-            if sheet_name in wb_v.sheetnames:
-                sheet_v = wb_v[sheet_name]
-                row_v = _find_device_row(sheet_v, device_name)
-                if row_v is not None:
-                    marker_prefix = f"C:{booking_id}"
-                    for col in range(3, sheet_v.max_column + 1):
-                        cell_val = sheet_v.cell(row=row_v, column=col).value
+            for m_start, m_end in _iter_month_ranges(start_date, end_date):
+                sheet_name = _get_month_sheet_name(m_start)
+                if sheet_name not in wb.sheetnames:
+                    raise ValueError(f"シートが見つかりません: {sheet_name}")
+                sheet = wb[sheet_name]
+                device_row = _find_device_row(sheet, device_name)
+                if device_row is None:
+                    raise ValueError(f"デモ機が見つかりません: {device_name}")
+                marker_prefix = f"C:{booking_id}"
+                for col in range(3, sheet.max_column + 1):
+                    header_val = sheet.cell(row=8, column=col).value
+                    day = _normalize_header_day(header_val)
+                    if day is not None and m_start.day <= day <= m_end.day:
+                        cell_val = sheet.cell(row=device_row, column=col).value
                         if isinstance(cell_val, str) and cell_val.startswith(marker_prefix):
-                            sheet_v.cell(row=row_v, column=col, value=None)
-        wb_v.save(excel_path)
-        # give filesystem a moment to flush on Windows environments
-        time.sleep(0.05)
-    finally:
-        wb_v.close()
+                            sheet.cell(row=device_row, column=col, value=None)
+
+            _safe_save_workbook(wb, excel_path)
+        finally:
+            wb.close()
