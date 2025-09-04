@@ -155,6 +155,17 @@ def _safe_save_workbook(wb, excel_path):
             bak_path = None  # backup failed, continue anyway
 
     wb.save(tmp_path)
+    # ensure bytes are flushed to disk
+    with open(tmp_path, "rb") as _fh:
+        try:
+            os.fsync(_fh.fileno())
+        except OSError:
+            pass
+    # close workbook before replacing to release file handles on Windows
+    try:
+        wb.close()
+    except Exception:
+        pass
     os.replace(tmp_path, excel_path)
 
     post_size = os.path.getsize(excel_path)
@@ -168,7 +179,7 @@ def _validate_or_restore(
     post_size,
     expected_sheets,
     max_ratio_diff: float,
-    min_size_bytes: int = 1024,
+    min_size_bytes: int = 4096,
 ):
     """
     Validate that workbook was saved correctly; restore backup on suspicion.
@@ -176,6 +187,23 @@ def _validate_or_restore(
     Returns True if validation passed, False if restore executed.
     """
     ok = True
+    # -------- ZIP structure check -------- #
+    try:
+        with zipfile.ZipFile(excel_path, "r") as zf:
+            required = {"[Content_Types].xml", "xl/workbook.xml"}
+            names = set(zf.namelist())
+            if not required.issubset(names) or zf.testzip() is not None:
+                ok = False
+    except Exception:
+        ok = False
+
+    if not ok:
+        if bak_path and os.path.exists(bak_path):
+            try:
+                shutil.copy2(bak_path, excel_path)
+            except Exception:
+                pass
+        return False
     try:
         wb_v = openpyxl.load_workbook(excel_path)
         try:
