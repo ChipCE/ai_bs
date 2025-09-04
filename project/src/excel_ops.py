@@ -266,6 +266,7 @@ def _is_file_in_use(path):
 # --------------------------------------------------------------------------- #
 
 _RATIO_LIMIT = float(os.getenv("EXCEL_SIZE_DIFF_RATIO", "0.5"))
+_WRITE_MODE = os.getenv("EXCEL_WRITE_MODE", "").strip().lower()
 
 
 # --------------------------------------------------------------------------- #
@@ -336,6 +337,143 @@ def _normalize_header_day(value):
                 return None
     return None
 
+
+# --------------------------------------------------------------------------- #
+# COM-based helpers                                                          #
+# --------------------------------------------------------------------------- #
+
+try:
+    import win32com.client as win32  # type: ignore
+except Exception:
+    win32 = None
+
+def _com_ensure_booking_log_sheet(wb):
+    try:
+        wb.Worksheets("予約ログ")
+    except Exception:
+        ws = wb.Worksheets.Add(After=wb.Worksheets(wb.Worksheets.Count))
+        ws.Name = "予約ログ"
+        headers = [
+            '予約ID','予約日時','予約者名','内線番号','職番',
+            'デモ機名','予約開始日','予約終了日','ステータス'
+        ]
+        for i, h in enumerate(headers, 1):
+            ws.Cells(1, i).Value = h
+
+
+def _com_find_device_row(ws, device_name):
+    last_row = ws.Cells(ws.Rows.Count, 2).End(-4162).Row  # xlUp
+    for r in range(9, last_row + 1):
+        if str(ws.Cells(r, 2).Value).strip() == str(device_name):
+            return r
+    return None
+
+
+def _com_get_date_columns(ws, m_start, m_end):
+    cols = []
+    last_col = ws.Cells(8, ws.Columns.Count).End(-4159).Column  # xlToLeft
+    for c in range(3, last_col + 1):
+        val = ws.Cells(8, c).Value
+        day = _normalize_header_day(val)
+        if day is not None and m_start.day <= day <= m_end.day:
+            cols.append(c)
+    if not cols:
+        raise ValueError("日付が見つかりません")
+    return cols
+
+
+def _com_book(excel_path, device_name, start_date, end_date, user_info):
+    if win32 is None:
+        raise RuntimeError("win32com is unavailable; cannot use COM write mode")
+    excel = win32.Dispatch("Excel.Application")
+    excel.DisplayAlerts = False
+    excel.Visible = False
+    try:
+        wb = excel.Workbooks.Open(excel_path, UpdateLinks=0, ReadOnly=False)
+        try:
+            booking_id = _generate_booking_id()
+            marker = f"C:{booking_id}"
+            for m_start, m_end in _iter_month_ranges(start_date, end_date):
+                sheet_name = _get_month_sheet_name(m_start)
+                try:
+                    ws = wb.Worksheets(sheet_name)
+                except Exception:
+                    raise ValueError(f"シートが見つかりません: {sheet_name}")
+                row = _com_find_device_row(ws, device_name)
+                if row is None:
+                    raise ValueError(f"デモ機が見つかりません: {device_name}")
+                for c in _com_get_date_columns(ws, m_start, m_end):
+                    ws.Cells(row, c).Value = marker
+
+            _com_ensure_booking_log_sheet(wb)
+            log = wb.Worksheets("予約ログ")
+            last = log.Cells(log.Rows.Count, 1).End(-4162).Row  # xlUp
+            next_row = last + 1 if last >= 1 else 2
+            now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+            log.Cells(next_row, 1).Value = booking_id
+            log.Cells(next_row, 2).Value = now
+            log.Cells(next_row, 3).Value = user_info.get('name', '')
+            log.Cells(next_row, 4).Value = user_info.get('extension', '')
+            log.Cells(next_row, 5).Value = user_info.get('employee_id', '')
+            log.Cells(next_row, 6).Value = device_name
+            log.Cells(next_row, 7).Value = start_date.strftime("%Y-%m-%d")
+            log.Cells(next_row, 8).Value = end_date.strftime("%Y-%m-%d")
+            log.Cells(next_row, 9).Value = '予約中'
+
+            wb.Save()
+            return booking_id
+        finally:
+            wb.Close(SaveChanges=True)
+    finally:
+        excel.Quit()
+
+
+def _com_cancel(excel_path, booking_id):
+    if win32 is None:
+        raise RuntimeError("win32com is unavailable; cannot use COM write mode")
+    excel = win32.Dispatch("Excel.Application")
+    excel.DisplayAlerts = False
+    excel.Visible = False
+    try:
+        wb = excel.Workbooks.Open(excel_path, UpdateLinks=0, ReadOnly=False)
+        try:
+            log = wb.Worksheets("予約ログ")
+            last = log.Cells(log.Rows.Count, 1).End(-4162).Row
+            target_row = None
+            for r in range(2, last + 1):
+                if str(log.Cells(r, 1).Value).strip() == str(booking_id):
+                    target_row = r
+                    break
+            if target_row is None:
+                raise ValueError(f"予約IDが見つかりません: {booking_id}")
+            device_name = str(log.Cells(target_row, 6).Value).strip()
+            start_date = datetime.strptime(str(log.Cells(target_row, 7).Value).strip(), "%Y-%m-%d").date()
+            end_date = datetime.strptime(str(log.Cells(target_row, 8).Value).strip(), "%Y-%m-%d").date()
+
+            for m_start, m_end in _iter_month_ranges(start_date, end_date):
+                sheet_name = _get_month_sheet_name(m_start)
+                try:
+                    ws = wb.Worksheets(sheet_name)
+                except Exception:
+                    raise ValueError(f"シートが見つかりません: {sheet_name}")
+                row = _com_find_device_row(ws, device_name)
+                if row is None:
+                    raise ValueError(f"デモ機が見つかりません: {device_name}")
+                prefix = f"C:{booking_id}"
+                last_col = ws.Cells(8, ws.Columns.Count).End(-4159).Column
+                for c in range(3, last_col + 1):
+                    val = ws.Cells(8, c).Value
+                    day = _normalize_header_day(val)
+                    if day is not None and m_start.day <= day <= m_end.day:
+                        cell_val = ws.Cells(row, c).Value
+                        if isinstance(cell_val, str) and cell_val.startswith(prefix):
+                            ws.Cells(row, c).Value = None
+
+            wb.Save()
+        finally:
+            wb.Close(SaveChanges=True)
+    finally:
+        excel.Quit()
 
 
 def check_availability(excel_path, device_name, start_date, end_date):
@@ -424,6 +562,11 @@ def book(excel_path, device_name, start_date, end_date, user_info):
     Raises:
         ValueError: If the device is already booked for any day in the range
     """
+    if _WRITE_MODE == 'com':
+        # availability check still uses openpyxl (read-only), but it only reads
+        booking_id = _com_book(excel_path, device_name, start_date, end_date, user_info)
+        return booking_id
+    
     # First check if available
     if not check_availability(excel_path, device_name, start_date, end_date):
         raise ValueError(f"指定された期間にデモ機 '{device_name}' は既に予約されています")
@@ -494,6 +637,10 @@ def cancel(excel_path, booking_id):
     Raises:
         ValueError: If the booking ID is not found
     """
+    if _WRITE_MODE == 'com':
+        _com_cancel(excel_path, booking_id)
+        return
+        
     with _FileLock(excel_path):
         wb = openpyxl.load_workbook(excel_path)
         try:
