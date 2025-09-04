@@ -4,6 +4,8 @@ from calendar import monthrange
 import uuid
 import os
 import time  # for filesystem flush on some platforms
+import re
+import unicodedata
 
 # --------------------------------------------------------------------------- #
 # Date helpers for multi-month support                                       #
@@ -59,20 +61,27 @@ def _find_device_row(sheet, device_name):
 
 
 def _get_date_column(sheet, day):
-    """Find the column index for a specific day in row 8."""
+    """Find the column index for a specific day, tolerant to header formats."""
+    # Primary: row 8
     for col in range(3, sheet.max_column + 1):
-        if sheet.cell(row=8, column=col).value == day:
+        if _normalize_header_day(sheet.cell(row=8, column=col).value) == day:
             return col
+    # Fallback: nearby rows in case layout shifted
+    for hdr_row in (7, 9, 10):
+        if hdr_row <= sheet.max_row:
+            for col in range(3, sheet.max_column + 1):
+                if _normalize_header_day(sheet.cell(row=hdr_row, column=col).value) == day:
+                    return col
     return None
 
 
 def _get_date_columns(sheet, start_date, end_date):
-    """Get list of column indices for a date range."""
+    """Get list of column indices for a date range using tolerant header parsing."""
     columns = []
-    for day in range(start_date.day, end_date.day + 1):
-        col = _get_date_column(sheet, day)
+    for d in range(start_date.day, end_date.day + 1):
+        col = _get_date_column(sheet, d)
         if col is None:
-            raise ValueError(f"日付が見つかりません: {day}")
+            raise ValueError(f"日付が見つかりません: {d}")
         columns.append(col)
     return columns
 
@@ -97,20 +106,42 @@ def _iter_device_rows(sheet):
             yield row, str(name)
 
 
+def _normalize_header_day(value):
+    """
+    Convert various header cell values to an int day-of-month.
+
+    Acceptable formats:
+      * int / float  -> 1..31
+      * datetime / date -> .day
+      * str -> '1', '01', '1日', '１' etc. (full-width digits ok)
+
+    Returns:
+        int | None
+    """
+    from datetime import datetime as _dt
+    from datetime import date as _date
+
+    if isinstance(value, (int, float)):
+        try:
+            return int(value)
+        except Exception:
+            return None
+    if isinstance(value, (_dt, _date)):
+        return int(value.day)
+    if isinstance(value, str):
+        s = unicodedata.normalize("NFKC", value).strip()
+        m = re.search(r"(\d{1,2})", s)
+        if m:
+            try:
+                return int(m.group(1))
+            except Exception:
+                return None
+    return None
+
+
 
 def check_availability(excel_path, device_name, start_date, end_date):
-    """
-    Check if a device is available for the specified date range.
-    
-    Args:
-        excel_path: Path to the Excel file
-        device_name: Name of the device to check
-        start_date: Start date (inclusive)
-        end_date: End date (inclusive)
-        
-    Returns:
-        bool: True if available, False if already booked
-    """
+    """Check if a device is available for the specified date range."""
     wb = openpyxl.load_workbook(excel_path)
     try:
         for m_start, m_end in _iter_month_ranges(start_date, end_date):
@@ -123,8 +154,7 @@ def check_availability(excel_path, device_name, start_date, end_date):
             if device_row is None:
                 raise ValueError(f"デモ機が見つかりません: {device_name}")
 
-            cols = _get_date_columns(sheet, m_start, m_end)
-            for col in cols:
+            for col in _get_date_columns(sheet, m_start, m_end):
                 if sheet.cell(row=device_row, column=col).value is not None:
                     return False
         return True
