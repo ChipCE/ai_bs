@@ -199,6 +199,26 @@ def create_app():
                     extra = "\n(キャンセル可能な予約は見つかりませんでした)"
                 reply_text = "予約IDを入力してください。" + extra
                 next_state = "AWAITING_CANCEL_BOOKING_ID"
+
+        # ------------------------------------------------------------------ #
+        # 予約確認フロー                                                 #
+        # ------------------------------------------------------------------ #
+        elif state == "AWAITING_COMMAND" and text in ("確認", "予約確認", "予約状況"):
+            try:
+                items = excel_ops.list_user_bookings(excel_path, user_info)
+            except Exception:
+                items = []
+
+            if items:
+                lines = [
+                    f"- {it['booking_id']} [{it['status']}] {it['device_name']} "
+                    f"{it['start_date']}→{it['end_date']}"
+                    for it in items[:10]
+                ]
+                reply_text = "あなたの予約一覧:\n" + "\n".join(lines)
+            else:
+                reply_text = "あなたの予約は見つかりませんでした。"
+            next_state = "AWAITING_COMMAND"
         elif state == "CANCEL_CONFIRM" and context.get("intent") == "cancel":
             if text == "はい":
                 try:

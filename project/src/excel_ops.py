@@ -520,6 +520,66 @@ def check_availability(excel_path, device_name, start_date, end_date):
         wb.close()
 
 
+# --------------------------------------------------------------------------- #
+# Public helper: list user bookings (any status)                              #
+# --------------------------------------------------------------------------- #
+
+def list_user_bookings(excel_path, user_info, statuses=None):
+    """
+    List bookings (optionally filtered by status) for the given user.
+
+    Args:
+        excel_path (str): Path to workbook
+        user_info (dict): {'name', 'extension', 'employee_id'}
+        statuses (Iterable[str] | None): Filter by these status strings.
+            None means no filtering (all statuses)
+
+    Returns
+    -------
+    list[dict]  Each dict has:
+        booking_id, device_name, start_date, end_date, status
+    """
+    wb = openpyxl.load_workbook(excel_path, read_only=True)
+    try:
+        try:
+            log = wb["予約ログ"]
+        except KeyError:
+            return []
+
+        name = str(user_info.get("name", "") or "")
+        ext = str(user_info.get("extension", "") or "")
+        emp = str(user_info.get("employee_id", "") or "")
+
+        results = []
+        for row in range(2, log.max_row + 1):
+            st = str(log.cell(row=row, column=9).value or "").strip()
+            if statuses is not None and st not in statuses:
+                continue
+
+            uname = str(log.cell(row=row, column=3).value or "").strip()
+            uext = str(log.cell(row=row, column=4).value or "").strip()
+            uemp = str(log.cell(row=row, column=5).value or "").strip()
+
+            if not (
+                (name and uname == name)
+                or (ext and uext == ext)
+                or (emp and uemp == emp)
+            ):
+                continue
+
+            results.append(
+                {
+                    "booking_id": str(log.cell(row=row, column=1).value or "").strip(),
+                    "device_name": str(log.cell(row=row, column=6).value or "").strip(),
+                    "start_date": str(log.cell(row=row, column=7).value or "").strip(),
+                    "end_date": str(log.cell(row=row, column=8).value or "").strip(),
+                    "status": st,
+                }
+            )
+        return results
+    finally:
+        wb.close()
+
 def find_available_device(excel_path, device_type, start_date, end_date):
     """
     Find the first available device of a given *type* for the specified period.
