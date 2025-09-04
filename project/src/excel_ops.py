@@ -126,21 +126,81 @@ class _FileLock:
 def _safe_save_workbook(wb, excel_path):
     """
     Save workbook atomically and keep a timestamped backup of the original file.
+
+    Returns
+    -------
+    (bak_path, pre_size, post_size)
     """
     base_dir = os.path.dirname(excel_path)
     tmp_path = os.path.join(base_dir, f"._tmp_{uuid.uuid4().hex}.xlsx")
+    bak_path = None
 
-    # Backup (best-effort)
+    pre_size = os.path.getsize(excel_path) if os.path.exists(excel_path) else None
+
     if os.path.exists(excel_path):
         ts = datetime.now().strftime("%Y%m%d%H%M%S")
         bak_path = os.path.join(base_dir, f"{os.path.basename(excel_path)}.{ts}.bak")
         try:
             shutil.copy2(excel_path, bak_path)
         except Exception:
-            pass
+            bak_path = None  # backup failed, continue anyway
 
     wb.save(tmp_path)
     os.replace(tmp_path, excel_path)
+
+    post_size = os.path.getsize(excel_path)
+    return bak_path, pre_size, post_size
+
+
+def _validate_or_restore(
+    excel_path,
+    bak_path,
+    pre_size,
+    post_size,
+    expected_sheets,
+    max_ratio_diff: float = 0.5,
+    min_size_bytes: int = 1024,
+):
+    """
+    Validate that workbook was saved correctly; restore backup on suspicion.
+
+    Returns True if validation passed, False if restore executed.
+    """
+    ok = True
+    try:
+        wb_v = openpyxl.load_workbook(excel_path)
+        try:
+            # sheet presence
+            for s in expected_sheets:
+                if s not in wb_v.sheetnames:
+                    ok = False
+                    break
+        finally:
+            wb_v.close()
+    except Exception:
+        ok = False
+
+    # size checks
+    if ok and pre_size is not None and post_size is not None:
+        try:
+            ratio = abs(post_size - pre_size) / max(pre_size, 1)
+            if ratio > max_ratio_diff:
+                ok = False
+        except Exception:
+            ok = False
+    if ok and post_size is not None and post_size < min_size_bytes:
+        ok = False
+
+    if ok:
+        return True
+
+    # attempt restore
+    if bak_path and os.path.exists(bak_path):
+        try:
+            shutil.copy2(bak_path, excel_path)
+        except Exception:
+            pass
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -337,7 +397,22 @@ def book(excel_path, device_name, start_date, end_date, user_info):
             log_sheet.cell(row=next_row, column=8, value=end_date_str)
             log_sheet.cell(row=next_row, column=9, value='予約中')
 
-            _safe_save_workbook(wb, excel_path)
+            # --- atomic save & validate ---------------------------------- #
+            bak_path, pre_size, post_size = _safe_save_workbook(wb, excel_path)
+            # expected sheets: all months touched + 予約ログ
+            expected = {"予約ログ"}
+            for m_start, _m_end in _iter_month_ranges(start_date, end_date):
+                expected.add(_get_month_sheet_name(m_start))
+            ok = _validate_or_restore(
+                excel_path,
+                bak_path,
+                pre_size,
+                post_size,
+                list(expected),
+                max_ratio_diff=0.5,
+            )
+            if not ok:
+                raise IOError("ファイル保存に失敗しました。バックアップから復旧しました。")
             return booking_id
         finally:
             wb.close()
@@ -387,6 +462,20 @@ def cancel(excel_path, booking_id):
                         if isinstance(cell_val, str) and cell_val.startswith(marker_prefix):
                             sheet.cell(row=device_row, column=col, value=None)
 
-            _safe_save_workbook(wb, excel_path)
+            # --- atomic save & validate (same logic as book) -------------- #
+            bak_path, pre_size, post_size = _safe_save_workbook(wb, excel_path)
+            expected = {"予約ログ"}
+            for m_start, _m_end in _iter_month_ranges(start_date, end_date):
+                expected.add(_get_month_sheet_name(m_start))
+            ok = _validate_or_restore(
+                excel_path,
+                bak_path,
+                pre_size,
+                post_size,
+                list(expected),
+                max_ratio_diff=0.5,
+            )
+            if not ok:
+                raise IOError("ファイル保存に失敗しました。バックアップから復旧しました。")
         finally:
             wb.close()
