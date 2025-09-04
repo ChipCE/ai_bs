@@ -346,6 +346,10 @@ try:
     import win32com.client as win32  # type: ignore
 except Exception:
     win32 = None
+try:
+    import pythoncom  # type: ignore
+except Exception:
+    pythoncom = None
 
 def _com_ensure_booking_log_sheet(wb):
     try:
@@ -385,6 +389,8 @@ def _com_get_date_columns(ws, m_start, m_end):
 def _com_book(excel_path, device_name, start_date, end_date, user_info):
     if win32 is None:
         raise RuntimeError("win32com is unavailable; cannot use COM write mode")
+    if pythoncom is not None:
+        pythoncom.CoInitialize()
     excel = win32.Dispatch("Excel.Application")
     excel.DisplayAlerts = False
     excel.Visible = False
@@ -426,11 +432,18 @@ def _com_book(excel_path, device_name, start_date, end_date, user_info):
             wb.Close(SaveChanges=True)
     finally:
         excel.Quit()
+        if pythoncom is not None:
+            try:
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
 
 
 def _com_cancel(excel_path, booking_id):
     if win32 is None:
         raise RuntimeError("win32com is unavailable; cannot use COM write mode")
+    if pythoncom is not None:
+        pythoncom.CoInitialize()
     excel = win32.Dispatch("Excel.Application")
     excel.DisplayAlerts = False
     excel.Visible = False
@@ -474,6 +487,11 @@ def _com_cancel(excel_path, booking_id):
             wb.Close(SaveChanges=True)
     finally:
         excel.Quit()
+        if pythoncom is not None:
+            try:
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
 
 
 def check_availability(excel_path, device_name, start_date, end_date):
