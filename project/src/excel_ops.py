@@ -7,6 +7,8 @@ import time  # for filesystem flush on some platforms
 import re
 import unicodedata
 import shutil  # for backup copy
+import zipfile
+import msvcrt
 
 # --------------------------------------------------------------------------- #
 # Date helpers for multi-month support                                       #
@@ -101,6 +103,7 @@ class _FileLock:
 
     def __init__(self, target_path, timeout: float = 10.0, interval: float = 0.1):
         self.lock_dir = target_path + ".lock"
+        self.target_path = target_path
         self.timeout = timeout
         self.interval = interval
 
@@ -114,6 +117,12 @@ class _FileLock:
                 if time.time() - start > self.timeout:
                     raise TimeoutError("ファイルが使用中です。しばらくしてから再度お試しください。")
                 time.sleep(self.interval)
+        # Wait while Excel (or another proc) keeps file locked
+        start = time.time()
+        while _is_file_in_use(self.target_path):
+            if time.time() - start > self.timeout:
+                raise TimeoutError("Excelでファイルが開かれています。閉じてから再度お試しください。")
+            time.sleep(self.interval)
         return self
 
     def __exit__(self, exc_type, exc, tb):
@@ -158,7 +167,7 @@ def _validate_or_restore(
     pre_size,
     post_size,
     expected_sheets,
-    max_ratio_diff: float = 0.5,
+    max_ratio_diff: float,
     min_size_bytes: int = 1024,
 ):
     """
@@ -194,6 +203,7 @@ def _validate_or_restore(
     if ok:
         return True
 
+    # attempt ZIP validation failed, or other checks failed
     # attempt restore
     if bak_path and os.path.exists(bak_path):
         try:
@@ -201,6 +211,33 @@ def _validate_or_restore(
         except Exception:
             pass
     return False
+
+
+# --------------------------------------------------------------------------- #
+# File lock helper                                                            #
+# --------------------------------------------------------------------------- #
+
+def _is_file_in_use(path):
+    """Best-effort check on Windows: returns True if the file is locked."""
+    if not os.path.exists(path):
+        return False
+    try:
+        with open(path, "r+b") as fh:
+            try:
+                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                return False
+            except OSError:
+                return True
+    except OSError:
+        return True
+
+
+# --------------------------------------------------------------------------- #
+# Config                                                                      #
+# --------------------------------------------------------------------------- #
+
+_RATIO_LIMIT = float(os.getenv("EXCEL_SIZE_DIFF_RATIO", "0.5"))
 
 
 # --------------------------------------------------------------------------- #
@@ -409,7 +446,7 @@ def book(excel_path, device_name, start_date, end_date, user_info):
                 pre_size,
                 post_size,
                 list(expected),
-                max_ratio_diff=0.5,
+                max_ratio_diff=_RATIO_LIMIT,
             )
             if not ok:
                 raise IOError("ファイル保存に失敗しました。バックアップから復旧しました。")
@@ -473,7 +510,7 @@ def cancel(excel_path, booking_id):
                 pre_size,
                 post_size,
                 list(expected),
-                max_ratio_diff=0.5,
+                max_ratio_diff=_RATIO_LIMIT,
             )
             if not ok:
                 raise IOError("ファイル保存に失敗しました。バックアップから復旧しました。")
