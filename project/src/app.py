@@ -103,28 +103,34 @@ def create_app():
             else:
                 # 検索
                 dev_type = context.get("device_type")
-                candidate = excel_ops.find_available_device(
-                    excel_path, dev_type, start_date, end_date
-                )
-                if candidate:
-                    context.update(
-                        {
-                            "start_date": start_date.isoformat(),
-                            "end_date": end_date.isoformat(),
-                            "candidate_device": candidate,
-                        }
+                try:
+                    candidate = excel_ops.find_available_device(
+                        excel_path, dev_type, start_date, end_date
                     )
-                    reply_text = (
-                        f"{candidate} を {start_date:%Y-%m-%d} から "
-                        f"{end_date:%Y-%m-%d} で予約します。よろしいですか？（はい / いいえ）"
-                    )
-                    next_state = "CONFIRM_RESERVATION"
-                else:
-                    reply_text = (
-                        "指定期間で空いているデモ機が見つかりません。"
-                        "別の日付を入力してください。"
-                    )
+                except Exception as e:
+                    # 例: 月シートが存在しない等
+                    reply_text = f"期間の確認中にエラーが発生しました: {e}"
                     next_state = "AWAITING_DATES"
+                else:
+                    if candidate:
+                        context.update(
+                            {
+                                "start_date": start_date.isoformat(),
+                                "end_date": end_date.isoformat(),
+                                "candidate_device": candidate,
+                            }
+                        )
+                        reply_text = (
+                            f"{candidate} を {start_date:%Y-%m-%d} から "
+                            f"{end_date:%Y-%m-%d} で予約します。よろしいですか？（はい / いいえ）"
+                        )
+                        next_state = "CONFIRM_RESERVATION"
+                    else:
+                        reply_text = (
+                            "指定期間で空いているデモ機が見つかりません。"
+                            "別の日付を入力してください。"
+                        )
+                        next_state = "AWAITING_DATES"
         elif state == "CONFIRM_RESERVATION" and context.get("intent") == "reserve":
             if text == "はい":
                 try:
