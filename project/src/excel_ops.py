@@ -426,6 +426,10 @@ def _com_book(excel_path, device_name, start_date, end_date, user_info):
             log.Cells(next_row, 8).Value = end_date.strftime("%Y-%m-%d")
             log.Cells(next_row, 9).Value = '予約中'
 
+            # Set font color to black for the new log row
+            for i in range(1, 10):
+                log.Cells(next_row, i).Font.ColorIndex = 1
+
             wb.Save()
             return booking_id
         finally:
