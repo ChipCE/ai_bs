@@ -162,7 +162,21 @@ def create_app():
         # ------------------------------------------------------------------ #
         elif state == "AWAITING_COMMAND" and text == "キャンセル":
             context["intent"] = "cancel"
-            reply_text = "予約IDを入力してください。"
+            # fetch cancellable bookings for this user
+            try:
+                items = excel_ops.list_cancellable_bookings(excel_path, user_info)
+            except Exception:
+                items = []
+            if items:
+                # show up to 10 entries
+                lines = [
+                    f"- {it['booking_id']} ({it['device_name']}: {it['start_date']}→{it['end_date']})"
+                    for it in items[:10]
+                ]
+                extra = "\n" + "\n".join(lines)
+            else:
+                extra = "\n(キャンセル可能な予約は見つかりませんでした)"
+            reply_text = "予約IDを入力してください。" + extra
             next_state = "AWAITING_CANCEL_BOOKING_ID"
         elif state == "AWAITING_CANCEL_BOOKING_ID" and context.get("intent") == "cancel":
             booking_id = (text or "").strip()
@@ -171,7 +185,19 @@ def create_app():
                 reply_text = "この予約をキャンセルしますか？（はい / いいえ）"
                 next_state = "CANCEL_CONFIRM"
             else:
-                reply_text = "予約IDを入力してください。"
+                try:
+                    items = excel_ops.list_cancellable_bookings(excel_path, user_info)
+                except Exception:
+                    items = []
+                if items:
+                    lines = [
+                        f"- {it['booking_id']} ({it['device_name']}: {it['start_date']}→{it['end_date']})"
+                        for it in items[:10]
+                    ]
+                    extra = "\n" + "\n".join(lines)
+                else:
+                    extra = "\n(キャンセル可能な予約は見つかりませんでした)"
+                reply_text = "予約IDを入力してください。" + extra
                 next_state = "AWAITING_CANCEL_BOOKING_ID"
         elif state == "CANCEL_CONFIRM" and context.get("intent") == "cancel":
             if text == "はい":

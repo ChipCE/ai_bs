@@ -648,6 +648,70 @@ def book(excel_path, device_name, start_date, end_date, user_info):
             wb.close()
 
 
+# --------------------------------------------------------------------------- #
+# Public helper: list cancellable bookings                                   #
+# --------------------------------------------------------------------------- #
+
+def list_cancellable_bookings(excel_path, user_info):
+    """
+    Return a list of active bookings ('予約中') for the given user.
+
+    Matching keys: name, extension, employee_id.
+    Each item is a dict::
+
+        {
+            'booking_id': str,
+            'device_name': str,
+            'start_date': 'YYYY-MM-DD',
+            'end_date':   'YYYY-MM-DD',
+        }
+    """
+    wb = openpyxl.load_workbook(excel_path, read_only=True)
+    try:
+        try:
+            log = wb['予約ログ']
+        except KeyError:
+            return []
+
+        results = []
+        name = str(user_info.get('name', '') or '')
+        ext = str(user_info.get('extension', '') or '')
+        emp = str(user_info.get('employee_id', '') or '')
+
+        for row in range(2, log.max_row + 1):
+            status = str(log.cell(row=row, column=9).value or '').strip()
+            if status != '予約中':
+                continue
+
+            # user matching
+            uname = str(log.cell(row=row, column=3).value or '').strip()
+            uext = str(log.cell(row=row, column=4).value or '').strip()
+            uemp = str(log.cell(row=row, column=5).value or '').strip()
+
+            if not (
+                (name and uname == name)
+                or (ext and uext == ext)
+                or (emp and uemp == emp)
+            ):
+                continue
+
+            rid = str(log.cell(row=row, column=1).value or '').strip()
+            dev = str(log.cell(row=row, column=6).value or '').strip()
+            sd = str(log.cell(row=row, column=7).value or '').strip()
+            ed = str(log.cell(row=row, column=8).value or '').strip()
+            results.append(
+                {
+                    'booking_id': rid,
+                    'device_name': dev,
+                    'start_date': sd,
+                    'end_date': ed,
+                }
+            )
+        return results
+    finally:
+        wb.close()
+
+
 def cancel(excel_path, booking_id):
     """
     Cancel a booking by ID.
