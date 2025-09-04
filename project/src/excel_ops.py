@@ -92,6 +92,27 @@ def _generate_booking_id():
 
 
 # --------------------------------------------------------------------------- #
+# Helpers for booking log sheet                                              #
+# --------------------------------------------------------------------------- #
+
+def _ensure_booking_log_sheet(wb):
+    """
+    Ensure that a sheet named '予約ログ' exists and contains the correct headers.
+
+    This is called before writing to the log so that first-time or
+    手動で削除されたワークブックでも自動で復旧できる。
+    """
+    if '予約ログ' not in wb.sheetnames:
+        sheet = wb.create_sheet('予約ログ')
+        headers = [
+            '予約ID', '予約日時', '予約者名', '内線番号', '職番',
+            'デモ機名', '予約開始日', '予約終了日', 'ステータス'
+        ]
+        for i, h in enumerate(headers, 1):
+            sheet.cell(row=1, column=i, value=h)
+
+
+# --------------------------------------------------------------------------- #
 # Utility iterator to enumerate device rows                                  #
 # --------------------------------------------------------------------------- #
 
@@ -260,7 +281,8 @@ def book(excel_path, device_name, start_date, end_date, user_info):
         for col in _get_date_columns(sheet_m, m_start, m_end):
             sheet_m.cell(row=device_row_m, column=col, value=booking_marker)
     
-    # Add entry to booking log
+    # Ensure booking log sheet exists, then add entry
+    _ensure_booking_log_sheet(wb)
     log_sheet = wb['予約ログ']
     next_row = log_sheet.max_row + 1
     
