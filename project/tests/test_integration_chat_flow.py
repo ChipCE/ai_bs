@@ -121,7 +121,7 @@ def test_integration_reserve_then_cancel_single_month():
         for day in (10, 11, 12):
             col = 2 + day
             v = s9.cell(row=9, column=col).value
-            assert isinstance(v, str) and v.startswith(f'C:{booking_id}')
+            assert v == 'C'
         wb.close()
 
         # 9) cancel command

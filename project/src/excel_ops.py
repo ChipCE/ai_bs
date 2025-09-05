@@ -443,7 +443,7 @@ def _com_book(excel_path, device_name, start_date, end_date, user_info):
         wb = excel.Workbooks.Open(excel_path, UpdateLinks=0, ReadOnly=False)
         try:
             booking_id = _generate_booking_id()
-            marker = f"C:{booking_id}"
+            marker = "C"
             for m_start, m_end in _iter_month_ranges(start_date, end_date):
                 sheet_name = _get_month_sheet_name(m_start)
                 try:
@@ -528,7 +528,7 @@ def _com_cancel(excel_path, booking_id):
                     day = _normalize_header_day(val)
                     if day is not None and m_start.day <= day <= m_end.day:
                         cell_val = ws.Cells(row, c).Value
-                        if isinstance(cell_val, str) and cell_val.startswith(prefix):
+                        if isinstance(cell_val, str) and (cell_val == "C" or cell_val.startswith(prefix)):
                             ws.Cells(row, c).Value = None
 
             wb.Save()
@@ -703,7 +703,7 @@ def book(excel_path, device_name, start_date, end_date, user_info):
         try:
             # Mark cells across all months
             booking_id = _generate_booking_id()
-            booking_marker = f"C:{booking_id}"
+            booking_marker = "C"
             for m_start, m_end in _iter_month_ranges(start_date, end_date):
                 sheet_name = _get_month_sheet_name(m_start)
                 if sheet_name not in wb.sheetnames:
@@ -862,7 +862,7 @@ def cancel(excel_path, booking_id):
                     day = _normalize_header_day(header_val)
                     if day is not None and m_start.day <= day <= m_end.day:
                         cell_val = sheet.cell(row=device_row, column=col).value
-                        if isinstance(cell_val, str) and cell_val.startswith(marker_prefix):
+                        if isinstance(cell_val, str) and (cell_val == "C" or cell_val.startswith(marker_prefix)):
                             sheet.cell(row=device_row, column=col, value=None)
 
             # --- atomic save & validate (same logic as book) -------------- #

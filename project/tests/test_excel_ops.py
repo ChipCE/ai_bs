@@ -91,12 +91,9 @@ def test_booking_marks_cells_and_logs(sample_workbook):
     # Check month sheet cells are marked
     month_sheet = wb['25年9月']
     # Check cells for 9/10, 9/11, 9/12 (columns 12, 13, 14)
-    assert isinstance(month_sheet.cell(row=9, column=12).value, str) and \
-           month_sheet.cell(row=9, column=12).value.startswith('C:')
-    assert isinstance(month_sheet.cell(row=9, column=13).value, str) and \
-           month_sheet.cell(row=9, column=13).value.startswith('C:')
-    assert isinstance(month_sheet.cell(row=9, column=14).value, str) and \
-           month_sheet.cell(row=9, column=14).value.startswith('C:')
+    assert month_sheet.cell(row=9, column=12).value == 'C'
+    assert month_sheet.cell(row=9, column=13).value == 'C'
+    assert month_sheet.cell(row=9, column=14).value == 'C'
     
     # Check log sheet has entry
     log_sheet = wb['予約ログ']
