@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify, render_template
 import os
+import json
 from datetime import datetime, date
 
 # excel_ops resides in the same src package
@@ -13,6 +14,97 @@ import excel_ops
 excel_path = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "data", "デモ機予約表.xlsx")
 )
+
+# --------------------------------------------------------------------------- #
+# LLM (LM Studio) configuration                                               #
+# --------------------------------------------------------------------------- #
+
+LM_BASE = os.getenv("LMSTUDIO_BASE_URL", "http://172.17.200.13:1234")
+LM_MODEL = os.getenv("LMSTUDIO_MODEL", "meta-llama-llama-3.1-8b-instruct")
+LM_ENABLED = os.getenv("LMSTUDIO_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+
+
+def _ai_natural_reply(history, base_reply: str, state: str, user_info: dict, context: dict) -> str:
+    """
+    Ask LM Studio to paraphrase `base_reply` into natural Japanese while
+    preserving its factual content (IDs, dates, bullet layout).
+
+    Parameters
+    ----------
+    history : list[dict]
+        Recent message history items like {'role': 'user'|'assistant', 'content': str}
+        Only last ~8 turns are sent.
+    base_reply : str
+        Deterministic reply produced by state-machine.
+    state : str
+        Next state (for possible future prompt conditioning, not used now).
+    user_info / context : dict
+        Extra info if needed (currently unused).
+    """
+    if not LM_ENABLED:
+        return base_reply
+    try:
+        import requests  # local import to avoid hard dependency in tests
+    except Exception:
+        return base_reply
+
+    # Build prompt messages
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "あなたは社内デモ機予約Botです。常に日本語で、丁寧かつ簡潔に自然な口調で返答してください。"
+                "これから示す『基準応答』の意味内容・語順に含まれるID/日付/数値/箇条書きは決して改変しないで下さい。"
+                "必要なら短い前置きや補足を加えて構いませんが、重要情報は保持してください。"
+            ),
+        }
+    ]
+
+    # Add up to 8 recent turns
+    for m in (history or [])[-8:]:
+        role = "assistant" if m.get("role") == "assistant" else "user"
+        content = str(m.get("content", ""))
+        if content:
+            messages.append({"role": role, "content": content})
+
+    # Provide base reply to be rewritten
+    messages.append({"role": "system", "content": f"基準応答:\n{base_reply}"})
+    messages.append(
+        {
+            "role": "user",
+            "content": (
+                "上の基準応答の意味を絶対に変えずに、自然な日本語に言い換えてください。"
+                "ID,日付,箇条書きはそのまま維持してください。"
+            ),
+        }
+    )
+
+    try:
+        resp = requests.post(
+            f"{LM_BASE}/v1/chat/completions",
+            headers={"Content-Type": "application/json"},
+            data=json.dumps(
+                {
+                    "model": LM_MODEL,
+                    "messages": messages,
+                    "temperature": 0.3,
+                    "max_tokens": 512,
+                }
+            ),
+            timeout=8,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        content = (
+            data.get("choices", [{}])[0]
+            .get("message", {})
+            .get("content", "")
+            .strip()
+        )
+        return content or base_reply
+    except Exception:
+        # fallback silently
+        return base_reply
 
 
 def _parse_date_any(s: str) -> date:
@@ -36,7 +128,7 @@ def create_app():
         # An empty dict `{}` is allowed and will fall through to defaults.
         if data is None or not isinstance(data, dict):
             return jsonify({"error": "invalid JSON body"}), 400
-        
+        history = data.get('history') or []
         text = data.get('text')
         state = data.get('state')
         user_info = data.get('user_info', {})
@@ -241,6 +333,9 @@ def create_app():
             reply_text = f"入力を受け付けました: {text}"
             next_state = "AWAITING_COMMAND"
         
+        # --- AI natural rephrase (optional) -------------------------------- #
+        reply_text = _ai_natural_reply(history, reply_text, next_state, user_info, context)
+
         response = {
             "reply_text": reply_text,
             "next_state": next_state,
