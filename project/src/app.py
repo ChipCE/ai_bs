@@ -37,6 +37,8 @@ if not logger.handlers:
 LM_BASE = os.getenv("LMSTUDIO_BASE_URL", "http://172.17.200.13:1234")
 LM_MODEL = os.getenv("LMSTUDIO_MODEL", "meta-llama-llama-3.1-8b-instruct")
 LM_ENABLED = os.getenv("LMSTUDIO_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+# network timeout (seconds) for LM Studio calls
+LM_TIMEOUT = int(os.getenv("LMSTUDIO_TIMEOUT", "20"))
 
 
 def _ai_natural_reply(
@@ -122,7 +124,7 @@ def _ai_natural_reply(
                     "max_tokens": 512,
                 }
             ),
-            timeout=8,
+            timeout=LM_TIMEOUT,
         )
         resp.raise_for_status()
         logger.info("LM Studio replied with status %s", resp.status_code)
@@ -183,7 +185,7 @@ def _ai_extract_slots(history, text: str, state: str, user_info: dict, context: 
                 "temperature": 0,
                 "max_tokens": 400
             }),
-            timeout=8,
+            timeout=LM_TIMEOUT,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -368,16 +370,32 @@ def create_app():
                     )
                     next_state = "AWAITING_DATES"
             elif state == "AWAITING_DATES" and context.get("intent") == "reserve":
+                # まず AI 抽出スロットに日付があれば優先
+                start_date = end_date = None
+                sd = (slots.get("start_date") if isinstance(slots, dict) else None)
+                ed = (slots.get("end_date") if isinstance(slots, dict) else None)
                 try:
-                    start_str, end_str = [p.strip() for p in (text or "").split(",")]
-                    start_date = _parse_date_any(start_str)
-                    end_date = _parse_date_any(end_str)
+                    if sd and ed:
+                        start_date = _parse_date_any(sd)
+                        end_date = _parse_date_any(ed)
                 except Exception:
-                    reply_text = (
-                        "日付形式が正しくありません。再度 'YYYY-MM-DD,YYYY/MM/DD' 形式で入力してください。"
-                    )
-                    next_state = "AWAITING_DATES"
-                else:
+                    # スロット解釈失敗時は無視して手入力解析へ
+                    start_date = end_date = None
+
+                if start_date is None:
+                    # 手入力（カンマ区切り）を解析
+                    try:
+                        start_str, end_str = [p.strip() for p in (text or "").split(",")]
+                        start_date = _parse_date_any(start_str)
+                        end_date = _parse_date_any(end_str)
+                    except Exception:
+                        reply_text = (
+                            "日付形式が正しくありません。再度 'YYYY-MM-DD,YYYY/MM/DD' 形式で入力してください。"
+                        )
+                        next_state = "AWAITING_DATES"
+                        start_date = end_date = None
+
+                if start_date and end_date:
                     # 検索
                     dev_type = context.get("device_type")
                     try:
@@ -388,6 +406,7 @@ def create_app():
                         # 例: 月シートが存在しない等
                         reply_text = f"期間の確認中にエラーが発生しました: {e}"
                         next_state = "AWAITING_DATES"
+                # start_date が取れなかった場合は (上のエラーメッセージが設定済み) 何もしない
                     else:
                         if candidate:
                             context.update(
