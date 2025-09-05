@@ -1,7 +1,9 @@
 from flask import Flask, request, jsonify, render_template
 import os
 import json
+import logging
 from datetime import datetime, date
+from dotenv import load_dotenv
 
 # excel_ops resides in the same src package
 import excel_ops
@@ -14,6 +16,19 @@ import excel_ops
 excel_path = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "data", "デモ機予約表.xlsx")
 )
+
+# --------------------------------------------------------------------------- #
+# Logging & .env                                                             #
+# --------------------------------------------------------------------------- #
+
+# Load environment variables from .env if present (does nothing if missing)
+load_dotenv()
+
+# Basic logger. Application embedding this module can override config.
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    # Prevent duplicate handlers when reloading in dev-server
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 # --------------------------------------------------------------------------- #
 # LLM (LM Studio) configuration                                               #
@@ -48,11 +63,21 @@ def _ai_natural_reply(
         Extra info if needed (currently unused).
     """
     if not LM_ENABLED:
+        logger.debug("LM Studio disabled via env; skipping AI rewrite.")
         return base_reply, False
     try:
         import requests  # local import to avoid hard dependency in tests
     except Exception:
+        logger.warning("requests not available; cannot call LM Studio.")
         return base_reply, False
+
+    # Diagnostic log for AI configuration
+    logger.debug(
+        "Preparing LM Studio call | enabled=%s base=%s model=%s",
+        LM_ENABLED,
+        LM_BASE,
+        LM_MODEL,
+    )
 
     # Build prompt messages
     messages = [
@@ -100,6 +125,7 @@ def _ai_natural_reply(
             timeout=8,
         )
         resp.raise_for_status()
+        logger.info("LM Studio replied with status %s", resp.status_code)
         data = resp.json()
         content = (
             data.get("choices", [{}])[0]
@@ -110,6 +136,7 @@ def _ai_natural_reply(
         return (content or base_reply), True
     except Exception:
         # fallback silently
+        logger.warning("LM Studio call failed; falling back to base reply.", exc_info=True)
         return base_reply, False
 
 
