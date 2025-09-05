@@ -249,7 +249,10 @@ def create_app():
             reply_text = None
             next_state = None
         
-        if state == "AWAITING_COMMAND" and isinstance(slots, dict) and slots.get("intent"):
+        # -------------------------------------------------------------- #
+        # AI で意図(intent) が抽出できた場合の入口 ― 順不同入力に対応      #
+        # -------------------------------------------------------------- #
+        if isinstance(slots, dict) and slots.get("intent"):
             intent = slots.get("intent")
             if intent == "reserve":
                 context["intent"] = "reserve"
@@ -259,7 +262,18 @@ def create_app():
                     context["device_type"] = str(dev)
                 sd = slots.get("start_date")
                 ed = slots.get("end_date")
-                if context.get("device_type") and sd and ed:
+
+                # --- 不足項目があればまとめて質問 ------------------- #
+                missing = []
+                if not context.get("device_type"):
+                    missing.append("デバイス種別（例: FE/RT/PC）")
+                if not (sd and ed):
+                    missing.append("期間（開始日,終了日 または『明日から三日間』『来月の3日』など）")
+                if missing:
+                    reply_text = "不足: " + ", ".join(missing) + "。\nそれぞれ自由な順序で回答してください。"
+                    next_state = "AWAITING_COMMAND"
+                # ----------------------------------------------------- #
+                elif context.get("device_type") and sd and ed:
                     # proceed to search and confirm same as existing reserve flow
                     try:
                         start_date = _parse_date_any(sd)
@@ -284,11 +298,13 @@ def create_app():
                             reply_text = "指定期間で空いているデモ機が見つかりません。別の日付をご指定ください。"
                             next_state = "AWAITING_COMMAND"
                 elif context.get("device_type") and not (sd and ed):
-                    reply_text = "予約期間（開始日,終了日）をご指定ください。例: 2025-09-10,2025/09/12"
-                    next_state = "AWAITING_DATES"
+                    # dates missing only
+                    reply_text = "不足: 期間（開始日,終了日 または自然表現）。\n自由な形式で入力してください。"
+                    next_state = "AWAITING_COMMAND"
                 else:
-                    reply_text = "ご希望のデモ機の種類を入力してください。（例: FE / RT / PC）"
-                    next_state = "AWAITING_DEVICE_TYPE"
+                    # device missing only
+                    reply_text = "不足: デバイス種別（例: FE/RT/PC）。\n入力してください。"
+                    next_state = "AWAITING_COMMAND"
             elif intent == "cancel":
                 context["intent"] = "cancel"
                 b_id = slots.get("booking_id")
