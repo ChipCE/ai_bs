@@ -1,14 +1,8 @@
 document.addEventListener('DOMContentLoaded', () => {
-    // Initialize sessionStorage if needed
-    if (!sessionStorage.getItem('state')) {
-        sessionStorage.setItem('state', null);
-    }
-    if (!sessionStorage.getItem('user_info')) {
-        sessionStorage.setItem('user_info', JSON.stringify({}));
-    }
-    if (!sessionStorage.getItem('context')) {
-        sessionStorage.setItem('context', JSON.stringify({}));
-    }
+    // Always start a fresh session on page load
+    sessionStorage.setItem('state', 'null');
+    sessionStorage.setItem('user_info', JSON.stringify({}));
+    sessionStorage.setItem('context', JSON.stringify({}));
 
     const messagesContainer = document.getElementById('messages');
     const inputField = document.getElementById('input');
@@ -61,10 +55,8 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // Send initial message if state is null
-    if (sessionStorage.getItem('state') === 'null') {
-        sendMessage();
-    }
+    // Send initial message
+    sendMessage();
 
     // Handle send button click
     sendButton.addEventListener('click', () => {

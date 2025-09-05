@@ -4,3 +4,4 @@ python-dotenv==1.0.1
 pytest==8.2.2
 itsdangerous==2.1.2
 Werkzeug==3.0.3
+pywin32>=306; sys_platform == 'win32'
