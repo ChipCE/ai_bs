@@ -24,7 +24,13 @@ LM_MODEL = os.getenv("LMSTUDIO_MODEL", "meta-llama-llama-3.1-8b-instruct")
 LM_ENABLED = os.getenv("LMSTUDIO_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
 
 
-def _ai_natural_reply(history, base_reply: str, state: str, user_info: dict, context: dict) -> str:
+def _ai_natural_reply(
+    history,
+    base_reply: str,
+    state: str,
+    user_info: dict,
+    context: dict,
+) -> tuple[str, bool]:
     """
     Ask LM Studio to paraphrase `base_reply` into natural Japanese while
     preserving its factual content (IDs, dates, bullet layout).
@@ -42,11 +48,11 @@ def _ai_natural_reply(history, base_reply: str, state: str, user_info: dict, con
         Extra info if needed (currently unused).
     """
     if not LM_ENABLED:
-        return base_reply
+        return base_reply, False
     try:
         import requests  # local import to avoid hard dependency in tests
     except Exception:
-        return base_reply
+        return base_reply, False
 
     # Build prompt messages
     messages = [
@@ -101,10 +107,10 @@ def _ai_natural_reply(history, base_reply: str, state: str, user_info: dict, con
             .get("content", "")
             .strip()
         )
-        return content or base_reply
+        return (content or base_reply), True
     except Exception:
         # fallback silently
-        return base_reply
+        return base_reply, False
 
 
 def _parse_date_any(s: str) -> date:
@@ -334,13 +340,16 @@ def create_app():
             next_state = "AWAITING_COMMAND"
         
         # --- AI natural rephrase (optional) -------------------------------- #
-        reply_text = _ai_natural_reply(history, reply_text, next_state, user_info, context)
+        reply_text, ai_used = _ai_natural_reply(
+            history, reply_text, next_state, user_info, context
+        )
 
         response = {
             "reply_text": reply_text,
             "next_state": next_state,
             "user_info": user_info,
-            "context": context
+            "context": context,
+            "ai_used": ai_used,
         }
         
         return jsonify(response)
