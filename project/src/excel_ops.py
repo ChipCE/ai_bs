@@ -531,6 +531,9 @@ def _com_cancel(excel_path, booking_id):
                         if isinstance(cell_val, str) and (cell_val == "C" or cell_val.startswith(prefix)):
                             ws.Cells(row, c).Value = None
 
+            # --- update log status --------------------------------------- #
+            log.Cells(target_row, 9).Value = 'キャンセル済'
+
             wb.Save()
         finally:
             wb.Close(SaveChanges=True)
@@ -864,6 +867,9 @@ def cancel(excel_path, booking_id):
                         cell_val = sheet.cell(row=device_row, column=col).value
                         if isinstance(cell_val, str) and (cell_val == "C" or cell_val.startswith(marker_prefix)):
                             sheet.cell(row=device_row, column=col, value=None)
+
+            # Update log status
+            log_sheet.cell(row=booking_row, column=9, value='キャンセル済')
 
             # --- atomic save & validate (same logic as book) -------------- #
             bak_path, pre_size, post_size = _safe_save_workbook(wb, excel_path)
