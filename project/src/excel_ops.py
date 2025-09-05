@@ -342,6 +342,51 @@ def _normalize_header_day(value):
 # COM-based helpers                                                          #
 # --------------------------------------------------------------------------- #
 
+def _parse_log_date(value) -> date:
+    """
+    Parse a value coming from the 予約ログ開始/終了日セル into a datetime.date.
+
+    Accepts:
+      * datetime / date object
+      * ISO strings like '2025-09-05'
+      * Strings with time part '2025-09-05T00:00:00' or '2025-09-05 00:00:00'
+      * Strings that include offset '2025-09-05T00:00:00+09:00'
+
+    Any slash delimiter will be normalised to '-'.
+    """
+    from datetime import datetime as _dt, date as _date
+
+    if isinstance(value, _date):
+        return value if not isinstance(value, _dt) else value.date()
+
+    s = str(value or "").strip()
+    if not s:
+        raise ValueError("日付が空です")
+
+    # Normalise common variants
+    s = s.replace("Z", "+00:00").replace("/", "-")
+
+    # Fast path: first 10 chars look like YYYY-MM-DD
+    if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+        try:
+            return _date.fromisoformat(s[:10])
+        except Exception:
+            pass
+
+    # Fallback: full datetime parsing (accepts offset)
+    try:
+        return _dt.fromisoformat(s).date()
+    except Exception:
+        pass
+
+    # Last resort: regex extract
+    import re as _re
+    m = _re.search(r"(\d{4}-\d{2}-\d{2})", s)
+    if m:
+        return _date.fromisoformat(m.group(1))
+
+    raise ValueError(f"日付形式が正しくありません: {s}")
+
 try:
     import win32com.client as win32  # type: ignore
 except Exception:
@@ -398,7 +443,7 @@ def _com_book(excel_path, device_name, start_date, end_date, user_info):
         wb = excel.Workbooks.Open(excel_path, UpdateLinks=0, ReadOnly=False)
         try:
             booking_id = _generate_booking_id()
-            marker = f"C:{booking_id}"
+            marker = "C"
             for m_start, m_end in _iter_month_ranges(start_date, end_date):
                 sheet_name = _get_month_sheet_name(m_start)
                 try:
@@ -464,8 +509,8 @@ def _com_cancel(excel_path, booking_id):
             if target_row is None:
                 raise ValueError(f"予約IDが見つかりません: {booking_id}")
             device_name = str(log.Cells(target_row, 6).Value).strip()
-            start_date = datetime.strptime(str(log.Cells(target_row, 7).Value).strip(), "%Y-%m-%d").date()
-            end_date = datetime.strptime(str(log.Cells(target_row, 8).Value).strip(), "%Y-%m-%d").date()
+            start_date = _parse_log_date(log.Cells(target_row, 7).Value)
+            end_date = _parse_log_date(log.Cells(target_row, 8).Value)
 
             for m_start, m_end in _iter_month_ranges(start_date, end_date):
                 sheet_name = _get_month_sheet_name(m_start)
@@ -483,8 +528,11 @@ def _com_cancel(excel_path, booking_id):
                     day = _normalize_header_day(val)
                     if day is not None and m_start.day <= day <= m_end.day:
                         cell_val = ws.Cells(row, c).Value
-                        if isinstance(cell_val, str) and cell_val.startswith(prefix):
+                        if isinstance(cell_val, str) and (cell_val == "C" or cell_val.startswith(prefix)):
                             ws.Cells(row, c).Value = None
+
+            # --- update log status --------------------------------------- #
+            log.Cells(target_row, 9).Value = 'キャンセル済'
 
             wb.Save()
         finally:
@@ -658,7 +706,7 @@ def book(excel_path, device_name, start_date, end_date, user_info):
         try:
             # Mark cells across all months
             booking_id = _generate_booking_id()
-            booking_marker = f"C:{booking_id}"
+            booking_marker = "C"
             for m_start, m_end in _iter_month_ranges(start_date, end_date):
                 sheet_name = _get_month_sheet_name(m_start)
                 if sheet_name not in wb.sheetnames:
@@ -800,8 +848,8 @@ def cancel(excel_path, booking_id):
                 raise ValueError(f"予約IDが見つかりません: {booking_id}")
 
             device_name = log_sheet.cell(row=booking_row, column=6).value
-            start_date = datetime.strptime(log_sheet.cell(row=booking_row, column=7).value, "%Y-%m-%d").date()
-            end_date = datetime.strptime(log_sheet.cell(row=booking_row, column=8).value, "%Y-%m-%d").date()
+            start_date = _parse_log_date(log_sheet.cell(row=booking_row, column=7).value)
+            end_date = _parse_log_date(log_sheet.cell(row=booking_row, column=8).value)
 
             for m_start, m_end in _iter_month_ranges(start_date, end_date):
                 sheet_name = _get_month_sheet_name(m_start)
@@ -817,8 +865,11 @@ def cancel(excel_path, booking_id):
                     day = _normalize_header_day(header_val)
                     if day is not None and m_start.day <= day <= m_end.day:
                         cell_val = sheet.cell(row=device_row, column=col).value
-                        if isinstance(cell_val, str) and cell_val.startswith(marker_prefix):
+                        if isinstance(cell_val, str) and (cell_val == "C" or cell_val.startswith(marker_prefix)):
                             sheet.cell(row=device_row, column=col, value=None)
+
+            # Update log status
+            log_sheet.cell(row=booking_row, column=9, value='キャンセル済')
 
             # --- atomic save & validate (same logic as book) -------------- #
             bak_path, pre_size, post_size = _safe_save_workbook(wb, excel_path)
